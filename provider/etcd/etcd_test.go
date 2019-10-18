@@ -91,7 +91,7 @@ func TestAlertsSubscribePutStarvation(t *testing.T) {
 
 	marker := types.NewMarker(prometheus.NewRegistry())
 	alerts, err := NewAlerts(context.Background(), marker, 30*time.Minute, log.NewNopLogger(),
-		etcdEndpoints, etcdPrefix)
+		etcdEndpoints, etcdPrefix, etcdTimeoutGet, etcdTimeoutPut, etcdRetryFailureGet, etcdAlertSigDiff)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +148,7 @@ func TestAlertsPut(t *testing.T) {
 
 	marker := types.NewMarker(prometheus.NewRegistry())
 	alerts, err := NewAlerts(context.Background(), marker, 30*time.Minute, log.NewNopLogger(),
-		etcdEndpoints, etcdPrefix)
+		etcdEndpoints, etcdPrefix, etcdTimeoutGet, etcdTimeoutPut, etcdRetryFailureGet, etcdAlertSigDiff)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +181,7 @@ func TestAlertsSubscribe(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	alerts, err := NewAlerts(ctx, marker, 30*time.Minute, log.NewNopLogger(),
-		etcdEndpoints, etcdPrefix)
+		etcdEndpoints, etcdPrefix, etcdTimeoutGet, etcdTimeoutPut, etcdRetryFailureGet, etcdAlertSigDiff)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +263,7 @@ func TestAlertsGetPending(t *testing.T) {
 
 	marker := types.NewMarker(prometheus.NewRegistry())
 	alerts, err := NewAlerts(context.Background(), marker, 30*time.Minute, log.NewNopLogger(),
-		etcdEndpoints, etcdPrefix)
+		etcdEndpoints, etcdPrefix, etcdTimeoutGet, etcdTimeoutPut, etcdRetryFailureGet, etcdAlertSigDiff)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -311,7 +311,7 @@ func TestAlertsGC(t *testing.T) {
 
 	marker := types.NewMarker(prometheus.NewRegistry())
 	alerts, err := NewAlerts(context.Background(), marker, alertGcInterval, log.NewNopLogger(),
-		etcdEndpoints, etcdPrefix)
+		etcdEndpoints, etcdPrefix, etcdTimeoutGet, etcdTimeoutPut, etcdRetryFailureGet, etcdAlertSigDiff)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -71,28 +71,30 @@ var (
 	)
 )
 
-const EtcdTimeoutGet = 150 * time.Millisecond
-const EtcdTimeoutPut = 250 * time.Millisecond
-const EtcdDelayRunWatch = 10 * time.Second
-const EtcdDelayRunLoad = 15 * time.Second
-const EtcdRetryGetFailure = 5 * time.Second
-
 type EtcdClient struct {
-	alerts    *Alerts
-	endpoints []string
-	prefix    string
-	logger    log.Logger
-	client    *clientv3.Client
-	mtx       sync.Mutex
+	alerts          *Alerts
+	endpoints       []string
+	prefix          string
+	logger          log.Logger
+	client          *clientv3.Client
+	mtx             sync.Mutex
+	timeoutGet      time.Duration
+	timeoutPut      time.Duration
+	retryFailureGet time.Duration
+	alertSigDiff    time.Duration
 }
 
-func NewEtcdClient(ctx context.Context, a *Alerts, endpoints []string, prefix string) (*EtcdClient, error) {
+func NewEtcdClient(ctx context.Context, a *Alerts, endpoints []string, prefix string, timeoutGet time.Duration, timeoutPut time.Duration, retryFailureGet time.Duration, alertSigDiff time.Duration) (*EtcdClient, error) {
 
 	ec := &EtcdClient{
-		alerts:    a,
-		endpoints: endpoints,
-		prefix:    prefix,
-		logger:    log.With(a.logger, "component", "provider.etcd"),
+		alerts:          a,
+		endpoints:       endpoints,
+		prefix:          prefix,
+		logger:          log.With(a.logger, "component", "provider.etcd"),
+		timeoutGet:      timeoutGet,
+		timeoutPut:      timeoutPut,
+		retryFailureGet: retryFailureGet,
+		alertSigDiff:    alertSigDiff,
 	}
 
 	// create the configuration
@@ -140,8 +142,8 @@ func NewEtcdClient(ctx context.Context, a *Alerts, endpoints []string, prefix st
 func (ec *EtcdClient) CheckAndPut(oldAlert *types.Alert, alert *types.Alert) error {
 	// Reduce writes to Etcd.  Only put to Etcd if the current alert is
 	// "different" enough than the same alert in memory, as denoted by the
-	// AlertsShouldWriteToEtcd function.
-	if !AlertsShouldWriteToEtcd(oldAlert, alert) {
+	// alertsShouldWriteToEtcd function.
+	if !ec.alertsShouldWriteToEtcd(oldAlert, alert) {
 		etcdCheckAndPutTotal.With(prometheus.Labels{"status": "filtered"}).Inc()
 		return nil // skip write to etcd
 	}
@@ -151,6 +153,7 @@ func (ec *EtcdClient) CheckAndPut(oldAlert *types.Alert, alert *types.Alert) err
 }
 
 func (ec *EtcdClient) Get(fp model.Fingerprint) (*types.Alert, error) {
+	level.Debug(ec.logger).Log("msgs", "Attempting to get alert from etcd", "fingerprint", fmt.Sprintf("%+v", fp))
 	// We do a best effort.  If etcd is not initialized yet, then skip
 	if ec.client == nil {
 		level.Error(ec.logger).Log("msg", "Not getting alert from etcd, etcd not initialized yet")
@@ -158,7 +161,7 @@ func (ec *EtcdClient) Get(fp model.Fingerprint) (*types.Alert, error) {
 	}
 
 	// ensure the operation does not take too long
-	ctx, cancel := context.WithTimeout(context.Background(), EtcdTimeoutGet)
+	ctx, cancel := context.WithTimeout(context.Background(), ec.timeoutGet)
 	defer cancel()
 
 	ec.mtx.Lock()
@@ -186,10 +189,12 @@ func (ec *EtcdClient) Get(fp model.Fingerprint) (*types.Alert, error) {
 	}
 
 	etcdOperationsTotal.With(prometheus.Labels{"operation": "get", "result": "success"}).Inc()
+	level.Debug(ec.logger).Log("msgs", "Retrieved alert from etcd", "alert", fmt.Sprintf("%+v", alert))
 	return alert, nil
 }
 
 func (ec *EtcdClient) Put(alert *types.Alert) error {
+	level.Debug(ec.logger).Log("msgs", "Attempting to put alert into etcd", "alert", fmt.Sprintf("%+v", alert))
 	// We do a best effort.  If etcd is not initialized yet, then skip
 	if ec.client == nil {
 		level.Error(ec.logger).Log("msg", "Not putting alert to etcd, etcd not initialized yet")
@@ -205,7 +210,7 @@ func (ec *EtcdClient) Put(alert *types.Alert) error {
 	}
 
 	// ensure the operation does not take too long
-	ctx, cancel := context.WithTimeout(context.Background(), EtcdTimeoutPut)
+	ctx, cancel := context.WithTimeout(context.Background(), ec.timeoutPut)
 	defer cancel()
 
 	ec.mtx.Lock()
@@ -215,6 +220,8 @@ func (ec *EtcdClient) Put(alert *types.Alert) error {
 		level.Error(ec.logger).Log("msg", "Error putting alert to etcd", "err", err)
 		etcdOperationsTotal.With(prometheus.Labels{"operation": "put", "result": "error"}).Inc()
 		return err
+	} else {
+		level.Debug(ec.logger).Log("msgs", "Alert successfully put into etcd", "alert", fmt.Sprintf("%+v", alert))
 	}
 
 	etcdOperationsTotal.With(prometheus.Labels{"operation": "put", "result": "success"}).Inc()
@@ -258,7 +265,7 @@ func (ec *EtcdClient) RunWatch(ctx context.Context) {
 			etcdQueueLength.With(prometheus.Labels{"name": "watch"}).Set(float64(len(rch)))
 
 			for _, ev := range wresp.Events {
-				level.Debug(ec.logger).Log("msg", "watch received",
+				level.Debug(ec.logger).Log("msg", "Watch received",
 					"type", ev.Type, "key", fmt.Sprintf("%q", ev.Kv.Key), "value", fmt.Sprintf("%q", ev.Kv.Value))
 				if ev.Type.String() == "PUT" {
 					etcdWatchOperationsTotal.With(prometheus.Labels{"operation": "put"}).Inc()
@@ -291,12 +298,12 @@ func (ec *EtcdClient) RunLoadAllAlerts(ctx context.Context) {
 			ec.mtx.Unlock()
 			if err != nil {
 				level.Error(ec.logger).Log("msg", "Error fetching all alerts etcd", "err", err)
-				time.Sleep(EtcdRetryGetFailure)
+				time.Sleep(ec.retryFailureGet)
 				continue // retry
 			}
 
 			for _, ev := range resp.Kvs {
-				level.Debug(ec.logger).Log("msg", "get received",
+				level.Debug(ec.logger).Log("msg", "Get received",
 					"key", fmt.Sprintf("%q", ev.Key), "value", fmt.Sprintf("%q", ev.Value))
 				alert, err := UnmarshalAlert(string(ev.Value))
 				if err != nil {
@@ -311,7 +318,7 @@ func (ec *EtcdClient) RunLoadAllAlerts(ctx context.Context) {
 	}()
 }
 
-func AlertsShouldWriteToEtcd(a *types.Alert, o *types.Alert) bool {
+func (ec *EtcdClient) alertsShouldWriteToEtcd(a *types.Alert, o *types.Alert) bool {
 	// Check if the alerts are "different" enough.
 	// If alerts ARE "different" enough then return 'true' in order to write to Etcd
 	// If alerts are NOT "different" enough then return 'false' to skip writing to etcd
@@ -333,8 +340,7 @@ func AlertsShouldWriteToEtcd(a *types.Alert, o *types.Alert) bool {
 	}
 
 	// Write to etcd if EndsAt's are "different" enough
-	significantTimeDifference := 300 * time.Second
-	if (a.EndsAt.Before(o.EndsAt) && o.EndsAt.Sub(a.EndsAt) > significantTimeDifference) || (o.EndsAt.Before(a.EndsAt) && a.EndsAt.Sub(o.EndsAt) > significantTimeDifference) {
+	if (a.EndsAt.Before(o.EndsAt) && o.EndsAt.Sub(a.EndsAt) > ec.alertSigDiff) || (o.EndsAt.Before(a.EndsAt) && a.EndsAt.Sub(o.EndsAt) > ec.alertSigDiff) {
 		// Update because EndsAt is different enough
 		return true
 	}

@@ -190,6 +190,11 @@ func run() int {
 		alertStorageProvider = kingpin.Flag("alerts.storage.provider", "Alert storage \"mem\" or \"etcd\".").Default("mem").String()
 		alertEtcdEndpoints   = kingpin.Flag("alerts.etcd.endpoint", "Etcd server used for alert storage(may be repeated for each in etcd cluster).").Default("localhost:2379").Strings()
 		alertEtcdPrefix      = kingpin.Flag("alerts.etcd.prefix", "String prefix for storing AM alerts in etc").Default("am/alerts-").String()
+		etcdTimeoutGet       = kingpin.Flag("etcd.timeout.get", "Timeout for GET from etcd").Default("150ms").Duration()
+		etcdTimeoutPut       = kingpin.Flag("etcd.timeout.put", "Timeout for PUT to etcd").Default("250ms").Duration()
+		etcdDelayRunLoop     = kingpin.Flag("etcd.delay.run-loop", "Delay before running the etcd run-loop after startup").Default("15s").Duration()
+		etcdRetryFailureGet  = kingpin.Flag("etcd.retry.get", "Delay before retrying etcd GET failure").Default("5s").Duration()
+		etcdAlertSigDiff     = kingpin.Flag("etcd.alert.sig-time-diff", "The amount of time between a received alert's StartsAt one already in etcd that triggers and update").Default("30s").Duration()
 
 		externalURL    = kingpin.Flag("web.external-url", "The URL under which Alertmanager is externally reachable (for example, if Alertmanager is served via a reverse proxy). Used for generating relative and absolute links back to Alertmanager itself. If the URL has a path portion, it will be used to prefix all HTTP endpoints served by Alertmanager. If omitted, relevant URL components will be derived automatically.").String()
 		routePrefix    = kingpin.Flag("web.route-prefix", "Prefix for the internal routes of web endpoints. Defaults to path of --web.external-url.").String()
@@ -331,7 +336,7 @@ func run() int {
 			return 1
 		}
 	} else if *alertStorageProvider == "etcd" {
-		etcdAlerts, err := etcd.NewAlerts(context.Background(), marker, *alertGCInterval, logger, *alertEtcdEndpoints, *alertEtcdPrefix)
+		etcdAlerts, err := etcd.NewAlerts(context.Background(), marker, *alertGCInterval, logger, *alertEtcdEndpoints, *alertEtcdPrefix, *etcdTimeoutGet, *etcdTimeoutPut, *etcdRetryFailureGet, *etcdAlertSigDiff)
 		if err != nil {
 			level.Error(logger).Log("err", err)
 			return 1
@@ -339,7 +344,7 @@ func run() int {
 		alerts = etcdAlerts
 		go func() {
 			// delay start the run etcd loops so subscribers have time to initialize
-			time.Sleep(15 * time.Second)
+			time.Sleep(*etcdDelayRunLoop)
 			etcdAlerts.EtcdClient.RunWatch(context.Background())
 			etcdAlerts.EtcdClient.RunLoadAllAlerts(context.Background())
 		}()
