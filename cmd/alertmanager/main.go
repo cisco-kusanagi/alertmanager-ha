@@ -193,6 +193,7 @@ func run() int {
 		etcdTimeoutGet       = kingpin.Flag("etcd.timeout.get", "Timeout for GET from etcd").Default("150ms").Duration()
 		etcdTimeoutPut       = kingpin.Flag("etcd.timeout.put", "Timeout for PUT to etcd").Default("250ms").Duration()
 		etcdTimeoutDel       = kingpin.Flag("etcd.timeout.del", "Timeout for DEL to etcd").Default("250ms").Duration()
+		etcdOperationRetries = kingpin.Flag("etcd.operation.retries", "Retry attempts for Etcd Get/Put/Del Operations").Default("1").Int()
 		etcdDelayRunLoop     = kingpin.Flag("etcd.delay.run-loop", "Delay before running etcd run-loops after startup").Default("10s").Duration()
 		etcdRetryFailureLoad = kingpin.Flag("etcd.retry.load", "Delay before retrying failures of loading all alerts from etcd").Default("5s").Duration()
 
@@ -336,7 +337,7 @@ func run() int {
 			return 1
 		}
 	} else if *alertStorageProvider == "etcd" {
-		etcdAlerts, err := etcd.NewAlerts(context.Background(), marker, *alertGCInterval, logger, *alertEtcdEndpoints, *alertEtcdPrefix, *etcdTimeoutGet, *etcdTimeoutPut, *etcdTimeoutDel, *etcdRetryFailureLoad)
+		etcdAlerts, err := etcd.NewAlerts(context.Background(), marker, *alertGCInterval, logger, *alertEtcdEndpoints, *alertEtcdPrefix, *etcdTimeoutGet, *etcdTimeoutPut, *etcdTimeoutDel, *etcdOperationRetries, *etcdRetryFailureLoad)
 		if err != nil {
 			level.Error(logger).Log("err", err)
 			return 1

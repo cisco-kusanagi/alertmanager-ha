@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"strconv"
 	"sync"
 	"time"
 
@@ -53,7 +54,7 @@ var (
 			Name: "alertmanager_etcd_operations_total",
 			Help: "The total number of operations initiated to etcd",
 		},
-		[]string{"operation", "result"},
+		[]string{"operation", "result", "attempt"},
 	) // "operation": "get|put|delete", "result":"success|error"
 	etcdWatchOperationsTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
@@ -81,10 +82,11 @@ type EtcdClient struct {
 	timeoutGet       time.Duration
 	timeoutPut       time.Duration
 	timeoutDel       time.Duration
+	operationRetries int
 	retryFailureLoad time.Duration
 }
 
-func NewEtcdClient(ctx context.Context, a *Alerts, endpoints []string, prefix string, timeoutGet time.Duration, timeoutPut time.Duration, timeoutDel time.Duration, retryFailureLoad time.Duration) (*EtcdClient, error) {
+func NewEtcdClient(ctx context.Context, a *Alerts, endpoints []string, prefix string, timeoutGet time.Duration, timeoutPut time.Duration, timeoutDel time.Duration, operationRetries int, retryFailureLoad time.Duration) (*EtcdClient, error) {
 
 	ec := &EtcdClient{
 		alerts:           a,
@@ -94,6 +96,7 @@ func NewEtcdClient(ctx context.Context, a *Alerts, endpoints []string, prefix st
 		timeoutGet:       timeoutGet,
 		timeoutPut:       timeoutPut,
 		timeoutDel:       timeoutDel,
+		operationRetries: operationRetries,
 		retryFailureLoad: retryFailureLoad,
 	}
 
@@ -153,59 +156,70 @@ func (ec *EtcdClient) CheckAndPut(oldAlert *types.Alert, alert *types.Alert) err
 }
 
 func (ec *EtcdClient) Get(fp model.Fingerprint) (*types.Alert, error) {
-	level.Debug(ec.logger).Log("msgs", "Attempting to get alert from etcd", "fingerprint", fmt.Sprintf("%+v", fp))
 	// We do a best effort.  If etcd is not initialized yet, then skip
 	if ec.client == nil {
 		level.Error(ec.logger).Log("msg", "Not getting alert from etcd, etcd not initialized yet")
 		return nil, ErrorEtcdNotInitialized
 	}
 
+	key := ec.prefix + fp.String()
+	level.Debug(ec.logger).Log("msgs", "Attempting to get alert from etcd", "key", key)
+
 	// ensure the operation does not take too long
 	ctx, cancel := context.WithTimeout(context.Background(), ec.timeoutGet)
 	defer cancel()
 
-	ec.mtx.Lock()
-	resp, err := ec.client.Get(ctx, ec.prefix+fp.String())
-	ec.mtx.Unlock()
+	var err error
+	var i int
+	var resp *clientv3.GetResponse
+	for i = 0; i < ec.operationRetries+1; i++ {
+		ec.mtx.Lock()
+		resp, err = ec.client.Get(ctx, key)
+		ec.mtx.Unlock()
+		if err != nil {
+			etcdOperationsTotal.With(prometheus.Labels{"operation": "get", "result": "error", "attempt": strconv.Itoa(i)}).Inc()
+			continue
+		} else {
+			etcdOperationsTotal.With(prometheus.Labels{"operation": "get", "result": "success", "attempt": strconv.Itoa(i)}).Inc()
+			break
+		}
+	}
 	if err != nil {
-		level.Error(ec.logger).Log("msg", "Error getting alert from etcd", "err", err)
-		etcdOperationsTotal.With(prometheus.Labels{"operation": "get", "result": "error"}).Inc()
+		level.Error(ec.logger).Log("msg", "Etcd get alert error", "key", key, "attempt", strconv.Itoa(i), "err", err)
 		return nil, err
+	} else {
+		level.Debug(ec.logger).Log("msgs", "Etcd get alert success", "key", key, "attempt", strconv.Itoa(i))
 	}
 
 	if len(resp.Kvs) == 0 {
-		etcdOperationsTotal.With(prometheus.Labels{"operation": "get", "result": "notfound"}).Inc()
 		return nil, ErrorEtcdGetNoResult
 	} else if len(resp.Kvs) != 1 {
-		etcdOperationsTotal.With(prometheus.Labels{"operation": "get", "result": "error"}).Inc()
 		return nil, ErrorEtcdGetMultipleResults
 	}
 
 	alert, err := UnmarshalAlert(string(resp.Kvs[0].Value))
 	if err != nil {
 		level.Error(ec.logger).Log("msg", "Error unmarshaling JSON Alert", "err", err)
-		etcdOperationsTotal.With(prometheus.Labels{"operation": "get", "result": "error"}).Inc()
 		return nil, err
 	}
 
-	etcdOperationsTotal.With(prometheus.Labels{"operation": "get", "result": "success"}).Inc()
-	level.Debug(ec.logger).Log("msgs", "Retrieved alert from etcd", "alert", fmt.Sprintf("%+v", alert))
+	level.Debug(ec.logger).Log("msgs", "Retrieved alert from etcd", "key", key, "alert", fmt.Sprintf("%+v", alert))
 	return alert, nil
 }
 
 func (ec *EtcdClient) Put(alert *types.Alert) error {
-	level.Debug(ec.logger).Log("msgs", "Attempting to put alert into etcd", "alert", fmt.Sprintf("%+v", alert))
 	// We do a best effort.  If etcd is not initialized yet, then skip
 	if ec.client == nil {
 		level.Error(ec.logger).Log("msg", "Not putting alert to etcd, etcd not initialized yet")
 		return ErrorEtcdNotInitialized
 	}
 
-	fp := alert.Fingerprint()
+	key := ec.prefix + alert.Fingerprint().String()
+	level.Debug(ec.logger).Log("msgs", "Attempting to put alert into etcd", "key", "key", "alert", fmt.Sprintf("%+v", alert))
+
 	alertStr, err := MarshalAlert(alert)
 	if err != nil {
 		level.Error(ec.logger).Log("msg", "Error marshaling JSON Alert", "err", err)
-		etcdOperationsTotal.With(prometheus.Labels{"operation": "put", "result": "error"}).Inc()
 		return err
 	}
 
@@ -213,18 +227,25 @@ func (ec *EtcdClient) Put(alert *types.Alert) error {
 	ctx, cancel := context.WithTimeout(context.Background(), ec.timeoutPut)
 	defer cancel()
 
-	ec.mtx.Lock()
-	_, err = ec.client.Put(ctx, ec.prefix+fp.String(), alertStr)
-	ec.mtx.Unlock()
+	var i int
+	for i = 0; i < ec.operationRetries+1; i++ {
+		ec.mtx.Lock()
+		_, err = ec.client.Put(ctx, key, alertStr)
+		ec.mtx.Unlock()
+		if err != nil {
+			etcdOperationsTotal.With(prometheus.Labels{"operation": "put", "result": "error", "attempt": strconv.Itoa(i)}).Inc()
+			continue
+		} else {
+			etcdOperationsTotal.With(prometheus.Labels{"operation": "put", "result": "success", "attempt": strconv.Itoa(i)}).Inc()
+			break
+		}
+	}
 	if err != nil {
-		level.Error(ec.logger).Log("msg", "Error putting alert to etcd", "err", err)
-		etcdOperationsTotal.With(prometheus.Labels{"operation": "put", "result": "error"}).Inc()
+		level.Error(ec.logger).Log("msg", "Etcd put alert error", "key", key, "attempt", strconv.Itoa(i), "alert", fmt.Sprintf("%+v", alert), "err", err)
 		return err
 	} else {
-		level.Debug(ec.logger).Log("msgs", "Alert successfully put into etcd", "alert", fmt.Sprintf("%+v", alert))
+		level.Debug(ec.logger).Log("msgs", "Etcd put alert success", "key", key, "attempt", strconv.Itoa(i), "alert", fmt.Sprintf("%+v", alert))
 	}
-
-	etcdOperationsTotal.With(prometheus.Labels{"operation": "put", "result": "success"}).Inc()
 	return nil
 }
 
@@ -235,18 +256,33 @@ func (ec *EtcdClient) Del(fp model.Fingerprint) error {
 		return ErrorEtcdNotInitialized
 	}
 
+	key := ec.prefix + fp.String()
+	level.Debug(ec.logger).Log("msgs", "Attempting to delete alert from etcd", "key", "key")
+
 	// ensure the operation does not take too long
 	ctx, cancel := context.WithTimeout(context.Background(), ec.timeoutDel)
 	defer cancel()
 
-	ec.mtx.Lock()
-	_, err := ec.client.Delete(ctx, ec.prefix+fp.String())
-	ec.mtx.Unlock()
-	if err != nil {
-		etcdOperationsTotal.With(prometheus.Labels{"operation": "del", "result": "error"}).Inc()
-		return err
+	var err error
+	var i int
+	for i = 0; i < ec.operationRetries+1; i++ {
+		ec.mtx.Lock()
+		_, err = ec.client.Delete(ctx, ec.prefix+fp.String())
+		ec.mtx.Unlock()
+		if err != nil {
+			etcdOperationsTotal.With(prometheus.Labels{"operation": "del", "result": "error", "attempt": strconv.Itoa(i)}).Inc()
+			continue
+		} else {
+			etcdOperationsTotal.With(prometheus.Labels{"operation": "del", "result": "success", "attempt": strconv.Itoa(i)}).Inc()
+			break
+		}
 	}
-	etcdOperationsTotal.With(prometheus.Labels{"operation": "del", "result": "success"}).Inc()
+	if err != nil {
+		level.Error(ec.logger).Log("msg", "Etcd del alert error", "key", key, "attempt", strconv.Itoa(i), "err", err)
+		return err
+	} else {
+		level.Debug(ec.logger).Log("msgs", "Etcd del alert success", "key", key, "attempt", strconv.Itoa(i))
+	}
 	return nil
 }
 
