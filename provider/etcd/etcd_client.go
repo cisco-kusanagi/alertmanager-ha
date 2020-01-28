@@ -300,6 +300,10 @@ func (ec *EtcdClient) RunWatch(ctx context.Context) {
 		for wresp := range rch {
 			etcdQueueLength.With(prometheus.Labels{"name": "watch"}).Set(float64(len(rch)))
 
+			if wresp.Canceled {
+				level.Error(ec.logger).Log("Watch has been cancelled, %s", wresp.Err())
+			}
+
 			for _, ev := range wresp.Events {
 				level.Debug(ec.logger).Log("msg", "Watch received",
 					"type", ev.Type, "key", fmt.Sprintf("%q", ev.Kv.Key), "value", fmt.Sprintf("%q", ev.Kv.Value))
