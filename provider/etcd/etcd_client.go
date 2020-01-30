@@ -62,7 +62,7 @@ var (
 			Help: "The total number of operations received from etcd watch",
 		},
 		[]string{"operation"},
-	) // "operation":"put|delete"
+	) // "operation":"put|delete|cancel"
 	etcdQueueLength = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "alertmanager_etcd_queue_length",
@@ -301,6 +301,7 @@ func (ec *EtcdClient) RunWatch(ctx context.Context) {
 			etcdQueueLength.With(prometheus.Labels{"name": "watch"}).Set(float64(len(rch)))
 
 			if wresp.Canceled {
+				etcdWatchOperationsTotal.With(prometheus.Labels{"operation": "cancel"}).Inc()
 				level.Error(ec.logger).Log("Watch has been cancelled, %s", wresp.Err())
 			}
 
