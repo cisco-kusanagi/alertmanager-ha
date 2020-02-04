@@ -185,7 +185,7 @@ func (a *Alerts) put(fromEtcd bool, alerts ...*types.Alert) error {
 
 		if err := a.alerts.Set(alert); err != nil {
 			level.Error(a.logger).Log("msg", "error on set alert", "err", err)
-			continue
+			return err
 		}
 
 		if !fromEtcd {
