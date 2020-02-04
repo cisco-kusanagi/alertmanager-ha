@@ -302,7 +302,7 @@ func (ec *EtcdClient) RunWatch(ctx context.Context) {
 
 			if wresp.Canceled {
 				etcdWatchOperationsTotal.With(prometheus.Labels{"operation": "cancel"}).Inc()
-				level.Warn(ec.logger).Log("Watch has been cancelled, %s", wresp.Err())
+				level.Warn(ec.logger).Log("Watch has been cancelled. Closing and reopening watch:, %s", wresp.Err())
 				ec.RunWatch(ctx)
 				return
 			}

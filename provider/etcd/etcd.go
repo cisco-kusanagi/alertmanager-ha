@@ -189,9 +189,9 @@ func (a *Alerts) put(fromEtcd bool, alerts ...*types.Alert) error {
 		}
 
 		if !fromEtcd {
-			// best effort only; if there are errors, log and move on
 			if err := a.EtcdClient.CheckAndPut(old, alert); err != nil {
 				level.Error(a.logger).Log("msg", "error on put to etcd", "err", err)
+				return err
 			}
 		}
 
